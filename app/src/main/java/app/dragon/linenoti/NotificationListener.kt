@@ -32,31 +32,26 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
+import kotlinx.coroutines.runBlocking
 
 class NotificationListener : NotificationListenerService() {
 
     companion object {
         const val CHANNEL_ID = "line_message_channel_v1" // バージョンUP
         const val TAG = "LineNoti_Debug"
-        const val MAX_CHAT_HISTORY_SIZE = 30
         const val MAX_MSG_PER_CHAT = 20
     }
 
     private val serviceJob = SupervisorJob()
     private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
 
-    data class MyMessage(
-        val senderName: String,
-        val text: String,
-        val timestamp: Long,
-        val stickerUri: Uri?,
-        val iconPath: String?
-    )
+    private lateinit var db: AppDatabase
 
-    private val chatHistory = java.util.LinkedHashMap<String, MutableList<MyMessage>>(
-        16, 0.75f, true
-    )
-    private val chatMetadata = mutableMapOf<String, String>()
+    override fun onCreate() {
+        super.onCreate()
+        // DBインスタンスの初期化
+        db = AppDatabase.getDatabase(applicationContext)
+    }
 
     override fun onDestroy() {
         super.onDestroy()
@@ -115,12 +110,23 @@ class NotificationListener : NotificationListenerService() {
 
         val largeIconObj = extras.get("android.largeIcon")
 
-        // グループ名を記憶
-        if (!groupName.isNullOrEmpty()) {
-            chatMetadata[chatId] = groupName
-        }
 
         serviceScope.launch {
+            val lastMsg = db.messageDao().getLatestMessage(chatId)
+            val isDuplicate = if (lastMsg != null) {
+                val isSameText = (lastMsg.messageText == text)
+                val isRecent = (System.currentTimeMillis() - lastMsg.timestamp < 1500)
+                isSameText && isRecent
+            } else {
+                false
+            }
+
+            // 重複ならここで終了（DB保存もしないし、通知更新もしない）
+            if (isDuplicate) {
+                Log.d(TAG, "Duplicate skipped: $text")
+                return@launch
+            }
+
             val stickerUri = if (stickerUrl != null) {
                 downloadImageToCache(applicationContext, stickerUrl)
             } else { null }
@@ -129,7 +135,19 @@ class NotificationListener : NotificationListenerService() {
                 saveIconAndGetPath(applicationContext, largeIconObj, finalSenderName)
             } else { null }
 
+            val newEntity = MessageEntity(
+                chatId = chatId,
+                senderName = finalSenderName,
+                messageText = text,
+                timestamp = System.currentTimeMillis(),
+                stickerUri = stickerUri?.toString(), // URIを文字列に変換して保存
+                iconPath = iconPath
+            )
+
+            db.messageDao().insert(newEntity)
+
             updateHistoryAndNotify(
+                groupName,
                 finalSenderName,
                 chatId,
                 text,
@@ -149,8 +167,8 @@ class NotificationListener : NotificationListenerService() {
         if (chatId != null) {
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.cancel(chatId.hashCode())
-            synchronized(chatHistory){
-                chatHistory.remove(chatId)
+            serviceScope.launch {
+                db.messageDao().deleteHistoryByChatId(chatId)
             }
         }
     }
@@ -230,6 +248,7 @@ class NotificationListener : NotificationListenerService() {
     }
 
     private fun updateHistoryAndNotify(
+        groupName: String?,
         senderName: String,
         chatId: String,
         messageText: String,
@@ -241,8 +260,10 @@ class NotificationListener : NotificationListenerService() {
     ) {
         val context = applicationContext
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val storedGroupName = chatMetadata[chatId]
-        val isGroup = storedGroupName != null // グループかどうかの判定
+
+        val historyList = runBlocking {
+            db.messageDao().getLatestMessages(chatId, MAX_MSG_PER_CHAT).reversed()
+        }
 
         val audioAttributes = android.media.AudioAttributes.Builder()
             .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
@@ -261,30 +282,7 @@ class NotificationListener : NotificationListenerService() {
         }
         manager.createNotificationChannel(channel)
 
-        // 1. 履歴更新
-        synchronized(chatHistory) {
-            if (!chatHistory.containsKey(chatId)) {
-                if (chatHistory.size >= MAX_CHAT_HISTORY_SIZE) {
-                    val it = chatHistory.iterator()
-                    if (it.hasNext()) { it.next(); it.remove() }
-                }
-                chatHistory[chatId] = mutableListOf()
-            }
-        }
-        val historyList = chatHistory[chatId]!!
-
-        val lastMsg = historyList.lastOrNull()
-        val isDuplicate = if (lastMsg != null) {
-            val isSameText = (lastMsg.text == messageText)
-            val isRecent = (System.currentTimeMillis() - lastMsg.timestamp < 1500)
-            isSameText && isRecent
-        } else { false }
-
-        if (!isDuplicate) {
-            val newMessage = MyMessage(senderName, messageText, System.currentTimeMillis(), stickerUri, senderIconPath)
-            historyList.add(newMessage)
-            if (historyList.size > MAX_MSG_PER_CHAT) historyList.removeAt(0)
-        } else { return }
+        val isGroup = !groupName.isNullOrEmpty()
 
         // ★修正: 安全なデフォルト画像の作成処理
         // ここでエラーが起きても絶対にアプリを落とさないように try-catch で守る
@@ -312,38 +310,27 @@ class NotificationListener : NotificationListenerService() {
 
         // 2. チャット全体のアイコン（LargeIcon & ShortcutIcon）を決める
         val mainBitmap: Bitmap = if (isGroup) {
-            // グループならデフォルト画像
             defaultBitmap
         } else {
-            // 1対1なら最新の送信者の顔
             if (senderIconPath != null) {
-                // ファイル読み込み
-                val decoded = BitmapFactory.decodeFile(senderIconPath)
-                if (decoded != null) {
-                    decoded
-                } else {
-                    // 読み込み失敗したらデフォルト
-                    defaultBitmap
-                }
+                BitmapFactory.decodeFile(senderIconPath) ?: defaultBitmap
             } else {
-                // パスがないならデフォルト
                 defaultBitmap
             }
         }
-
         val mainIconCompat = IconCompat.createWithBitmap(mainBitmap)
 
         // 3. ショートカット登録
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val shortcutPerson = Person.Builder()
-                .setName(storedGroupName ?: senderName)
-                .setIcon(mainIconCompat) // グループなら固定アイコンになる
+                .setName(groupName ?: senderName)
+                .setIcon(mainIconCompat)
                 .setKey(chatId)
                 .build()
 
             val shortcut = ShortcutInfoCompat.Builder(context, chatId)
                 .setLongLived(true)
-                .setShortLabel(storedGroupName ?: senderName)
+                .setShortLabel(groupName ?: senderName)
                 .setPerson(shortcutPerson)
                 .setIntent(Intent(context, MainActivity::class.java).setAction(Intent.ACTION_VIEW))
                 .build()
@@ -354,18 +341,17 @@ class NotificationListener : NotificationListenerService() {
         val mePerson = Person.Builder().setName("自分").build()
         val style = NotificationCompat.MessagingStyle(mePerson)
 
-        style.conversationTitle = storedGroupName
+        style.conversationTitle = groupName
 
-        // ★ここ重要！「これはグループチャットです」と強制的に設定する
-        // これがないと、Androidは「conversationTitle」があっても気を利かせて1対1モード(アイコン非表示)にすることがある
         if (isGroup) {
             style.isGroupConversation = true
         }
 
-        for (msg in historyList) {
-            val msgIcon = if (msg.iconPath != null) {
+        for (entity in historyList) {
+            // 各メッセージのアイコン読み込み
+            val msgIcon = if (entity.iconPath != null) {
                 try {
-                    val bm = BitmapFactory.decodeFile(msg.iconPath)
+                    val bm = BitmapFactory.decodeFile(entity.iconPath)
                     IconCompat.createWithBitmap(bm)
                 } catch (e: Exception) {
                     IconCompat.createWithResource(context, R.drawable.ic_launcher_foreground)
@@ -375,26 +361,24 @@ class NotificationListener : NotificationListenerService() {
             }
 
             val msgPerson = Person.Builder()
-                .setName(msg.senderName)
-                .setIcon(msgIcon) // ここにセットしたアイコンが左側に出る
-                .setKey(msg.senderName)
+                .setName(entity.senderName)
+                .setIcon(msgIcon) // ここで個別の顔をセット
+                .setKey(entity.senderName)
                 .build()
 
             val styleMessage = NotificationCompat.MessagingStyle.Message(
-                msg.text,
-                msg.timestamp,
+                entity.messageText,
+                entity.timestamp,
                 msgPerson
             )
-            if (msg.stickerUri != null) {
-                styleMessage.setData("image/png", msg.stickerUri)
+            if (entity.stickerUri != null) {
+                styleMessage.setData("image/png", Uri.parse(entity.stickerUri))
             }
             style.addMessage(styleMessage)
         }
 
         val notificationBuilder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.baseline_chat_bubble_24)
-            // ★重要: 通知の右側に出る「全体のアイコン」を明示的にセット
-            // これで「最後の人の顔」がチャットの顔になるのを防げる
             .setLargeIcon(mainBitmap)
             .setColor(getColor(R.color.black))
             .setStyle(style)

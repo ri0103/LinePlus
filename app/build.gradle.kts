@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.jetbrains.kotlin.android)
+    id("com.google.devtools.ksp")
 }
 
 android {
@@ -50,6 +51,11 @@ android {
 }
 
 dependencies {
+
+
+    implementation(libs.androidx.room.ktx)
+    // Annotation Processor (コンパイル時にコードを自動生成する)
+    ksp("androidx.room:room-compiler:2.6.1")
 
     // 画像読み込み (スタンプ用)
     implementation("io.coil-kt:coil:2.5.0")
