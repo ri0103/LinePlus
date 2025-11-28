@@ -1,6 +1,7 @@
 package app.dragon.linenoti
 
 import android.Manifest
+import android.app.AppOpsManager
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
@@ -54,6 +55,7 @@ fun MainScreen() {
     var isPostNotiGranted by remember { mutableStateOf(checkPostNotificationPermission(context)) }
     var isListenerGranted by remember { mutableStateOf(checkListenerPermission(context)) }
     var isBatteryGranted by remember { mutableStateOf(checkBatteryOptimization(context)) }
+    var isUsageStatsGranted by remember { mutableStateOf(checkUsageStatsPermission(context)) }
 
     // 画面に戻るたびに再チェック
     DisposableEffect(lifecycleOwner) {
@@ -62,6 +64,7 @@ fun MainScreen() {
                 isPostNotiGranted = checkPostNotificationPermission(context)
                 isListenerGranted = checkListenerPermission(context)
                 isBatteryGranted = checkBatteryOptimization(context)
+                isUsageStatsGranted = checkUsageStatsPermission(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -131,6 +134,14 @@ fun MainScreen() {
             isDone = isBatteryGranted,
             buttonLabel = "制限を解除",
             onClick = { requestIgnoreBatteryOptimizations(context) }
+        )
+
+        SettingItemCard(
+            title = "4. 使用状況へのアクセス",
+            desc = "「既読」と「送信取消」を見分けるために必要です。\n(これをONにすると送信取消された通知が消えずに残ります)",
+            isDone = isUsageStatsGranted,
+            buttonLabel = "設定画面へ",
+            onClick = { openUsageStatsSettings(context) }
         )
 
         Spacer(modifier = Modifier.height(32.dp))
@@ -244,6 +255,22 @@ fun requestIgnoreBatteryOptimizations(context: Context) {
             context.startActivity(intent)
         } catch (ex: Exception) {}
     }
+}
+
+fun checkUsageStatsPermission(context: Context): Boolean {
+    val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+    val mode = appOps.checkOpNoThrow(
+        AppOpsManager.OPSTR_GET_USAGE_STATS,
+        android.os.Process.myUid(),
+        context.packageName
+    )
+    return mode == AppOpsManager.MODE_ALLOWED
+}
+
+fun openUsageStatsSettings(context: Context) {
+    try {
+        context.startActivity(Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS))
+    } catch (e: Exception) { }
 }
 
 // Intent: LINE設定

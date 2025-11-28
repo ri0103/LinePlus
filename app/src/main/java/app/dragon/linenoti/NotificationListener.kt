@@ -4,6 +4,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.RemoteInput
+import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -36,7 +37,7 @@ import java.io.FileOutputStream
 class NotificationListener : NotificationListenerService() {
 
     companion object {
-        const val CHANNEL_ID = "line_message_channel_v1" // バージョンUP
+        const val CHANNEL_ID = "line_message_channel_v1"
         const val TAG = "LineNoti_Debug"
         const val MAX_CHAT_HISTORY_SIZE = 30
         const val MAX_MSG_PER_CHAT = 20
@@ -53,10 +54,16 @@ class NotificationListener : NotificationListenerService() {
         val iconPath: String?
     )
 
+    // メモリ上の履歴
     private val chatHistory = java.util.LinkedHashMap<String, MutableList<MyMessage>>(
         16, 0.75f, true
     )
+
+    // グループ名の一時保管
     private val chatMetadata = mutableMapOf<String, String>()
+
+    // ★追加: Intentのキャッシュ (後出しジャンケン対応用)
+    private val chatIntents = mutableMapOf<String, PendingIntent>()
 
     override fun onDestroy() {
         super.onDestroy()
@@ -93,34 +100,28 @@ class NotificationListener : NotificationListenerService() {
 
         val stickerUrl = extras.getString("line.sticker.url")
         val chatId = extras.getString("line.chat.id") ?: "unknown_chat"
-        val originalPendingIntent = notification.contentIntent
+        val originalPendingIntent = notification.contentIntent // 今回のIntent
 
+        // Reply Action抽出
         var replyPendingIntent: PendingIntent? = null
-        // ★修正: android.app.RemoteInput を使用する
         var replyRemoteInputs: Array<android.app.RemoteInput>? = null
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             notification.actions?.lastOrNull()?.let { action ->
-                // RemoteInputの取得に成功したら、PendingIntentとRemoteInputsを取り出す
                 if (action.remoteInputs != null && action.remoteInputs.isNotEmpty()) {
                     replyPendingIntent = action.actionIntent
-
-                    // ★修正: RemoteInput[] の型を android.app.RemoteInput[] に変換する
-                    replyRemoteInputs = action.remoteInputs
-                        .map { it as android.app.RemoteInput } // キャスト
-                        .toTypedArray()
+                    replyRemoteInputs = action.remoteInputs.map { it as android.app.RemoteInput }.toTypedArray()
                 }
             }
         }
 
         val largeIconObj = extras.get("android.largeIcon")
 
-        // グループ名を記憶
         if (!groupName.isNullOrEmpty()) {
             chatMetadata[chatId] = groupName
         }
 
         serviceScope.launch {
+            // 画像取得 (非同期)
             val stickerUri = if (stickerUrl != null) {
                 downloadImageToCache(applicationContext, stickerUrl)
             } else { null }
@@ -129,30 +130,151 @@ class NotificationListener : NotificationListenerService() {
                 saveIconAndGetPath(applicationContext, largeIconObj, finalSenderName)
             } else { null }
 
+            // ★★★ 重複 & 更新チェックロジック ★★★
+            var isDuplicate = false
+            var needUpdate = false
+
+            synchronized(chatHistory) {
+                val list = chatHistory[chatId]
+                if (list != null && list.isNotEmpty()) {
+                    val lastMsg = list.last()
+                    val isSameText = (lastMsg.text == text)
+                    val isRecent = (System.currentTimeMillis() - lastMsg.timestamp < 1500)
+
+                    if (isSameText && isRecent) {
+                        isDuplicate = true
+
+                        // 重複だが「アイコンが新しくなった」場合
+                        if (iconPath != null && lastMsg.iconPath != iconPath) {
+                            Log.d(TAG, "重複: アイコン更新を検知")
+                            // 最新の履歴のアイコンパスを書き換える
+                            val updatedMsg = lastMsg.copy(iconPath = iconPath)
+                            list[list.size - 1] = updatedMsg
+                            needUpdate = true
+                        }
+
+                        // 重複だが「Intentが新しくなった」場合
+                        val cachedIntent = chatIntents[chatId]
+                        if (originalPendingIntent != null && originalPendingIntent != cachedIntent) {
+                            Log.d(TAG, "重複: Intent更新を検知")
+                            // キャッシュ更新 (後で使う)
+                            chatIntents[chatId] = originalPendingIntent
+                            needUpdate = true
+                        }
+                    }
+                }
+
+                // 重複でないなら新規追加
+                if (!isDuplicate) {
+                    if (!chatHistory.containsKey(chatId)) {
+                        if (chatHistory.size >= MAX_CHAT_HISTORY_SIZE) {
+                            val it = chatHistory.iterator()
+                            if (it.hasNext()) { it.next(); it.remove() }
+                        }
+                        chatHistory[chatId] = mutableListOf()
+                    }
+                    val newList = chatHistory[chatId]!!
+                    val newMessage = MyMessage(finalSenderName, text, System.currentTimeMillis(), stickerUri, iconPath)
+                    newList.add(newMessage)
+                    if (newList.size > MAX_MSG_PER_CHAT) newList.removeAt(0)
+
+                    // 新規ならIntentもキャッシュ更新
+                    if (originalPendingIntent != null) {
+                        chatIntents[chatId] = originalPendingIntent
+                    }
+                }
+            }
+
+            // 「重複していて、かつ更新も不要」ならここで終了
+            if (isDuplicate && !needUpdate) {
+                return@launch
+            }
+
+            // 更新が必要、もしくは新規通知なら、通知を発行する
+            // 使うIntentはキャッシュ(最新版)を優先
+            val finalIntent = chatIntents[chatId] ?: originalPendingIntent
+
             updateHistoryAndNotify(
                 finalSenderName,
                 chatId,
                 text,
                 stickerUri,
                 iconPath,
-                originalPendingIntent,
+                finalIntent, // 更新されたIntentを渡す
                 replyPendingIntent,
                 replyRemoteInputs
             )
         }
     }
 
-    override fun onNotificationRemoved(sbn: StatusBarNotification?) {
-        super.onNotificationRemoved(sbn)
+    override fun onNotificationRemoved(sbn: StatusBarNotification?, rankingMap: RankingMap?, reason: Int) {
+        super.onNotificationRemoved(sbn, rankingMap, reason)
         if (sbn?.packageName != "jp.naver.line.android") return
-        val chatId = sbn.notification.extras.getString("line.chat.id")
-        if (chatId != null) {
+        val extras = sbn.notification.extras
+        val chatId = sbn.notification.extras.getString("line.chat.id") ?: return
+
+        val isUserAction = reason == REASON_CANCEL || reason == REASON_CLICK || reason == REASON_GROUP_SUMMARY_CANCELED
+        var shouldDelete = isUserAction
+
+        if (reason == REASON_APP_CANCEL) {
+            if (isLineAppForeground(applicationContext)) {
+                shouldDelete = true
+                Log.d(TAG, "LINE起動中につき履歴を削除 (既読判定)")
+            } else {
+                shouldDelete = false
+                Log.d(TAG, "LINE裏起動につき履歴を保持 (送信取消/自動同期の可能性)")
+
+                // 送信取り消しメッセージの注入
+                val groupName = extras.getString("android.conversationTitle") ?: extras.getString("android.hiddenConversationTitle")
+                val rawTitle = extras.getString("android.title") ?: "不明"
+                val senderName = if (!groupName.isNullOrEmpty()) {
+                    rawTitle.replace("$groupName: ", "").replace("$groupName : ", "").replace(groupName, "").trim()
+                } else { rawTitle }
+                val finalSenderName = if (senderName.isEmpty()) rawTitle else senderName
+                val originalIntent = sbn.notification.contentIntent
+
+                var cachedIconPath: String? = null
+                synchronized(chatHistory) {
+                    cachedIconPath = chatHistory[chatId]?.lastOrNull()?.iconPath
+                }
+
+                serviceScope.launch {
+                    updateHistoryAndNotify(
+                        finalSenderName, chatId, "⚠️ 送信取り消しを検出", null, cachedIconPath,
+                        originalIntent, null, null
+                    )
+                }
+            }
+        }
+
+        if (shouldDelete) {
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.cancel(chatId.hashCode())
             synchronized(chatHistory){
                 chatHistory.remove(chatId)
+                chatIntents.remove(chatId) // Intentキャッシュも消す
             }
         }
+    }
+
+    // --- 以下、ヘルパー関数 ---
+
+    private fun isLineAppForeground(context: Context): Boolean {
+        try {
+            val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            val time = System.currentTimeMillis()
+            val stats = usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, time - 1000 * 60, time)
+            if (stats != null && stats.isNotEmpty()) {
+                val sorted = stats.sortedByDescending { it.lastTimeUsed }
+                if (sorted.isNotEmpty()) {
+                    val topApp = sorted[0]
+                    // 3秒以内に使われたか
+                    val isRecent = (time - topApp.lastTimeUsed) < 3000
+                    return topApp.packageName == "jp.naver.line.android" && isRecent
+                }
+            }
+        } catch (e: Exception) { Log.e(TAG, "UsageStats check failed: ${e.message}") }
+        return false
     }
 
     private fun saveIconAndGetPath(context: Context, iconObj: Any, nameKey: String): String? {
@@ -165,15 +287,12 @@ class NotificationListener : NotificationListenerService() {
                 }
                 else -> null
             } ?: return null
-
             val cachePath = File(context.cacheDir, "user_icons")
             if (!cachePath.exists()) cachePath.mkdirs()
             val fileName = "icon_${nameKey.hashCode()}.png"
             val file = File(cachePath, fileName)
-
             if (!file.exists()) {
                 val stream = FileOutputStream(file)
-                // アイコンは小さくていいので圧縮して保存
                 val scaled = Bitmap.createScaledBitmap(bitmap, 128, 128, true)
                 scaled.compress(Bitmap.CompressFormat.PNG, 100, stream)
                 stream.close()
@@ -184,11 +303,7 @@ class NotificationListener : NotificationListenerService() {
 
     private fun drawableToBitmap(drawable: Drawable): Bitmap {
         if (drawable is BitmapDrawable) return drawable.bitmap
-        val bitmap = Bitmap.createBitmap(
-            drawable.intrinsicWidth.coerceAtLeast(1),
-            drawable.intrinsicHeight.coerceAtLeast(1),
-            Bitmap.Config.ARGB_8888
-        )
+        val bitmap = Bitmap.createBitmap(drawable.intrinsicWidth.coerceAtLeast(1), drawable.intrinsicHeight.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         drawable.setBounds(0, 0, canvas.width, canvas.height)
         drawable.draw(canvas)
@@ -200,14 +315,9 @@ class NotificationListener : NotificationListenerService() {
         if (!cachePath.exists()) cachePath.mkdirs()
         val fileName = "sticker_${url.hashCode()}.png"
         val file = File(cachePath, fileName)
-        if (file.exists()) {
-            return FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
-        }
+        if (file.exists()) return FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
         val loader = ImageLoader(context)
-        val request = ImageRequest.Builder(context)
-            .data(url)
-            .allowHardware(false)
-            .build()
+        val request = ImageRequest.Builder(context).data(url).allowHardware(false).build()
         return try {
             val result = loader.execute(request)
             if (result is SuccessResult) {
@@ -241,8 +351,11 @@ class NotificationListener : NotificationListenerService() {
     ) {
         val context = applicationContext
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val storedGroupName = chatMetadata[chatId]
-        val isGroup = storedGroupName != null // グループかどうかの判定
+
+        // ★修正: メモリ管理なので chatHistory から直接リストを取得
+        val historyList = synchronized(chatHistory) {
+            chatHistory[chatId]?.toList() ?: emptyList()
+        }
 
         val audioAttributes = android.media.AudioAttributes.Builder()
             .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
@@ -261,86 +374,43 @@ class NotificationListener : NotificationListenerService() {
         }
         manager.createNotificationChannel(channel)
 
-        // 1. 履歴更新
-        synchronized(chatHistory) {
-            if (!chatHistory.containsKey(chatId)) {
-                if (chatHistory.size >= MAX_CHAT_HISTORY_SIZE) {
-                    val it = chatHistory.iterator()
-                    if (it.hasNext()) { it.next(); it.remove() }
-                }
-                chatHistory[chatId] = mutableListOf()
-            }
-        }
-        val historyList = chatHistory[chatId]!!
+        val storedGroupName = chatMetadata[chatId]
+        val isGroup = storedGroupName != null
 
-        val lastMsg = historyList.lastOrNull()
-        val isDuplicate = if (lastMsg != null) {
-            val isSameText = (lastMsg.text == messageText)
-            val isRecent = (System.currentTimeMillis() - lastMsg.timestamp < 1500)
-            isSameText && isRecent
-        } else { false }
-
-        if (!isDuplicate) {
-            val newMessage = MyMessage(senderName, messageText, System.currentTimeMillis(), stickerUri, senderIconPath)
-            historyList.add(newMessage)
-            if (historyList.size > MAX_MSG_PER_CHAT) historyList.removeAt(0)
-        } else { return }
-
-        // ★修正: 安全なデフォルト画像の作成処理
-        // ここでエラーが起きても絶対にアプリを落とさないように try-catch で守る
         val defaultBitmap = try {
-            val drawable = androidx.core.content.ContextCompat.getDrawable(context, R.drawable.ic_groups_default)
-
+            val drawable = androidx.core.content.ContextCompat.getDrawable(context, R.drawable.ic_groups_default) // ← リソース名確認
             val bitmap = Bitmap.createBitmap(128, 128, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bitmap)
-
-            // 安全な色の指定方法 (#06C755 = LINEグリーン)
-            canvas.drawColor(android.graphics.Color.parseColor("#085728"))
-
+            canvas.drawColor(android.graphics.Color.parseColor("#0e803c"))
             if (drawable != null) {
                 drawable.setBounds(0, 0, 128, 128)
                 drawable.draw(canvas)
             }
             bitmap
         } catch (e: Exception) {
-            // 万が一失敗したら、ただの緑色の四角を作る（緊急回避）
-            Log.e(TAG, "デフォルト画像作成エラー: ${e.message}")
-            val bitmap = Bitmap.createBitmap(128, 128, Bitmap.Config.ARGB_8888)
-            bitmap.eraseColor(android.graphics.Color.GREEN)
-            bitmap
+            val b = Bitmap.createBitmap(128, 128, Bitmap.Config.ARGB_8888)
+            b.eraseColor(android.graphics.Color.GREEN)
+            b
         }
 
-        // 2. チャット全体のアイコン（LargeIcon & ShortcutIcon）を決める
         val mainBitmap: Bitmap = if (isGroup) {
-            // グループならデフォルト画像
             defaultBitmap
         } else {
-            // 1対1なら最新の送信者の顔
+            // 1対1なら最新の送信者の顔 (senderIconPath)
             if (senderIconPath != null) {
-                // ファイル読み込み
-                val decoded = BitmapFactory.decodeFile(senderIconPath)
-                if (decoded != null) {
-                    decoded
-                } else {
-                    // 読み込み失敗したらデフォルト
-                    defaultBitmap
-                }
+                BitmapFactory.decodeFile(senderIconPath) ?: defaultBitmap
             } else {
-                // パスがないならデフォルト
                 defaultBitmap
             }
         }
-
         val mainIconCompat = IconCompat.createWithBitmap(mainBitmap)
 
-        // 3. ショートカット登録
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val shortcutPerson = Person.Builder()
                 .setName(storedGroupName ?: senderName)
-                .setIcon(mainIconCompat) // グループなら固定アイコンになる
+                .setIcon(mainIconCompat)
                 .setKey(chatId)
                 .build()
-
             val shortcut = ShortcutInfoCompat.Builder(context, chatId)
                 .setLongLived(true)
                 .setShortLabel(storedGroupName ?: senderName)
@@ -350,14 +420,9 @@ class NotificationListener : NotificationListenerService() {
             ShortcutManagerCompat.pushDynamicShortcut(context, shortcut)
         }
 
-        // 4. MessagingStyle構築
         val mePerson = Person.Builder().setName("自分").build()
         val style = NotificationCompat.MessagingStyle(mePerson)
-
         style.conversationTitle = storedGroupName
-
-        // ★ここ重要！「これはグループチャットです」と強制的に設定する
-        // これがないと、Androidは「conversationTitle」があっても気を利かせて1対1モード(アイコン非表示)にすることがある
         if (isGroup) {
             style.isGroupConversation = true
         }
@@ -376,7 +441,7 @@ class NotificationListener : NotificationListenerService() {
 
             val msgPerson = Person.Builder()
                 .setName(msg.senderName)
-                .setIcon(msgIcon) // ここにセットしたアイコンが左側に出る
+                .setIcon(msgIcon)
                 .setKey(msg.senderName)
                 .build()
 
@@ -392,9 +457,7 @@ class NotificationListener : NotificationListenerService() {
         }
 
         val notificationBuilder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.baseline_chat_bubble_24)
-            // ★重要: 通知の右側に出る「全体のアイコン」を明示的にセット
-            // これで「最後の人の顔」がチャットの顔になるのを防げる
+            .setSmallIcon(R.drawable.ic_line_bubble) // ← アイコンリソース名確認
             .setLargeIcon(mainBitmap)
             .setColor(getColor(R.color.black))
             .setStyle(style)
@@ -405,30 +468,20 @@ class NotificationListener : NotificationListenerService() {
             .setAutoCancel(true)
             .setContentIntent(originalIntent)
 
-        // 5. 通知アクションの追加
         if (replyPendingIntent != null && replyRemoteInputs != null) {
-
-            // NotificationCompat.Action.Builder は androidx.core の RemoteInput を期待するため
-            // android.app.RemoteInput から androidx.core.app.RemoteInput に変換する
             val coreRemoteInputs = replyRemoteInputs
                 .map { androidx.core.app.RemoteInput.Builder(it.resultKey).setLabel(it.label).build() }
                 .toTypedArray()
 
-            // A. Action Builderを初期化
             val actionBuilder = NotificationCompat.Action.Builder(
                 R.drawable.ic_launcher_foreground,
                 "返信",
                 replyPendingIntent
             )
-
             coreRemoteInputs.forEach { input ->
                 actionBuilder.addRemoteInput(input)
             }
-
-            val action: NotificationCompat.Action = actionBuilder
-                .setAllowGeneratedReplies(true)
-                .build()
-
+            val action = actionBuilder.setAllowGeneratedReplies(true).build()
             notificationBuilder.addAction(action)
         }
 
