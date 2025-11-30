@@ -3,6 +3,7 @@ package app.dragon.linenoti
 import android.app.PendingIntent
 import android.content.ContentValues.TAG
 import android.graphics.Bitmap
+import android.graphics.drawable.Icon
 import android.net.Uri
 import android.os.Build
 import android.service.notification.NotificationListenerService
@@ -43,6 +44,27 @@ class NotificationListener : NotificationListenerService() {
         val notification = sbn.notification
         val extras = notification.extras
 
+        // ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+        // ★デバッグ用ログ出力: 通知の中身を全部吐き出す
+        // ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+        Log.d(TAG, "🚨 --- LINE通知受信 (${System.currentTimeMillis()}) ---")
+        Log.d(TAG, "ID: ${sbn.id}, Tag: ${sbn.tag}, Key: ${sbn.key}")
+        Log.d(TAG, "PostTime: ${sbn.postTime}")
+        Log.d(TAG, "IsGroup: ${extras.getBoolean("android.isGroupConversation")}")
+
+        for (key in extras.keySet()) {
+            val value = extras.get(key)
+            // 画像データなどは長すぎるので型だけ表示
+            val valueStr = when(value) {
+                is Bitmap -> "[Bitmap ${value.width}x${value.height}]"
+                is Icon -> "[Icon]"
+                else -> value.toString()
+            }
+            Log.d(TAG, "Extra: $key = $valueStr")
+        }
+        Log.d(TAG, "------------------------------------------")
+        // ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+
         // 1. データ抽出 (簡単なパースはここで行う)
         val text = extras.getCharSequence("android.text")?.toString() ?: "スタンプ"
         // フィルタリング
@@ -75,8 +97,11 @@ class NotificationListener : NotificationListenerService() {
             val stickerUri = stickerUrl?.let { imageManager.downloadSticker(it) }
             val iconPath = imageManager.saveIcon(largeIconObj, senderName)
 
+            val lineMessageId = extras.getString("line.message.id")
+
             // 3. データの保存と更新判定
             val shouldNotify = repository.addMessage(
+                messageId = lineMessageId,
                 chatId = chatId,
                 senderName = senderName,
                 text = text,

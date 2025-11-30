@@ -16,16 +16,13 @@ class ChatRepository {
 
     // Coroutine環境で安全にロックするためのMutex
     private val mutex = Mutex()
-
-    // 履歴データ (LRUキャッシュ)
     private val chatHistory = LinkedHashMap<String, MutableList<MyMessage>>(16, 0.75f, true)
-
-    // メタデータ
     private val chatMetadata = mutableMapOf<String, String>() // GroupName
     private val chatIntents = mutableMapOf<String, PendingIntent>() // Intent
 
     // メッセージを追加する (戻り値: 通知を更新すべきかどうか)
     suspend fun addMessage(
+        messageId: String?,
         chatId: String,
         senderName: String,
         text: String,
@@ -41,15 +38,55 @@ class ChatRepository {
             }
 
             // Intent更新
-            if (intent != null) {
+            var isIntentUpdated = false
+            if (intent != null && messageId != null) {
                 // 既存より新しいIntentなら更新
                 if (chatIntents[chatId] != intent) {
                     chatIntents[chatId] = intent
+                    isIntentUpdated = true
                 }
             }
 
             // 重複チェック
             val list = chatHistory[chatId]
+            // 2. IDによる重複チェック & 更新
+            if (messageId != null && list != null) {
+                // 同じIDのメッセージを探す (インデックスも知りたいので indexOfFirst は使わずループか find)
+                val existingIndex = list.indexOfFirst { it.messageId == messageId }
+
+                if (existingIndex != -1) {
+                    val existingMsg = list[existingIndex]
+                    var isContentUpdated = false
+
+                    // A. アイコン更新チェック
+                    // (新しいアイコンがあり、かつ既存と違う場合)
+                    if (iconPath != null && existingMsg.iconPath != iconPath) {
+                        Log.d(TAG, "ID重複: アイコン更新を検知")
+                        isContentUpdated = true
+                    }
+
+                    // B. スタンプ更新チェック
+                    // (新しいスタンプURIがあり、かつ既存と違う場合)
+                    if (stickerUri != null && existingMsg.stickerUri != stickerUri) {
+                        Log.d(TAG, "ID重複: スタンプ更新を検知")
+                        isContentUpdated = true
+                    }
+
+                    // 更新があるならリストを書き換える
+                    if (isContentUpdated) {
+                        // アイコンやスタンプを新しいものに更新したメッセージを作る
+                        val updatedMsg = existingMsg.copy(
+                            iconPath = iconPath ?: existingMsg.iconPath, // 新しいのがなければ古いの維持
+                            stickerUri = stickerUri ?: existingMsg.stickerUri
+                        )
+                        list[existingIndex] = updatedMsg
+                    }
+
+                    // 「中身が変わった」または「Intentが変わった」なら通知更新 (true)
+                    return isContentUpdated || isIntentUpdated
+                }
+            }
+
             if (list != null && list.isNotEmpty()) {
                 val lastMsg = list.last()
                 val isSameText = (lastMsg.text == text)
@@ -68,7 +105,7 @@ class ChatRepository {
                     }
 
                     // 重複で、かつ更新も不要なら false を返す
-                    return updated
+                    return updated || isIntentUpdated
                 }
             }
 
@@ -86,13 +123,13 @@ class ChatRepository {
             }
 
             val newList = chatHistory[chatId]!!
-            newList.add(MyMessage(senderName, text, System.currentTimeMillis(), stickerUri, iconPath))
+            newList.add(MyMessage(messageId ,senderName, text, System.currentTimeMillis(), stickerUri, iconPath))
 
             if (newList.size > MAX_MSG_PER_CHAT) {
                 newList.removeAt(0)
             }
 
-            return true // 通知すべき
+            return true
         }
     }
 

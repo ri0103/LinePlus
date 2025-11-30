@@ -3,6 +3,7 @@ package app.dragon.linenoti
 import android.net.Uri
 
 data class MyMessage(
+    val messageId: String?,
     val senderName: String,
     val text: String,
     val timestamp: Long,
