@@ -55,7 +55,7 @@ fun MainScreen() {
     var isPostNotiGranted by remember { mutableStateOf(checkPostNotificationPermission(context)) }
     var isListenerGranted by remember { mutableStateOf(checkListenerPermission(context)) }
     var isBatteryGranted by remember { mutableStateOf(checkBatteryOptimization(context)) }
-    var isUsageStatsGranted by remember { mutableStateOf(checkUsageStatsPermission(context)) }
+//    var isUsageStatsGranted by remember { mutableStateOf(checkUsageStatsPermission(context)) }
 
     // 画面に戻るたびに再チェック
     DisposableEffect(lifecycleOwner) {
@@ -64,7 +64,7 @@ fun MainScreen() {
                 isPostNotiGranted = checkPostNotificationPermission(context)
                 isListenerGranted = checkListenerPermission(context)
                 isBatteryGranted = checkBatteryOptimization(context)
-                isUsageStatsGranted = checkUsageStatsPermission(context)
+//                isUsageStatsGranted = checkUsageStatsPermission(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -136,13 +136,13 @@ fun MainScreen() {
             onClick = { requestIgnoreBatteryOptimizations(context) }
         )
 
-        SettingItemCard(
-            title = "4. 使用状況へのアクセス",
-            desc = "「既読」と「送信取消」を見分けるために必要です。\n(これをONにすると送信取消された通知が消えずに残ります)",
-            isDone = isUsageStatsGranted,
-            buttonLabel = "設定画面へ",
-            onClick = { openUsageStatsSettings(context) }
-        )
+//        SettingItemCard(
+//            title = "4. 使用状況へのアクセス",
+//            desc = "「既読」と「送信取消」を見分けるために必要です。\n(これをONにすると送信取消された通知が消えずに残ります)",
+//            isDone = isUsageStatsGranted,
+//            buttonLabel = "設定画面へ",
+//            onClick = { openUsageStatsSettings(context) }
+//        )
 
         Spacer(modifier = Modifier.height(32.dp))
 
