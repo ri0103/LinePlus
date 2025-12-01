@@ -21,14 +21,14 @@ class NotificationListener : NotificationListenerService() {
     private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
 
     // 各機能コンポーネント
-    private lateinit var repository: ChatRepository
+//    private lateinit var repository: ChatRepository
     private lateinit var imageManager: ImageManager
     private lateinit var renderer: NotificationRenderer
 
     override fun onCreate() {
         super.onCreate()
         // コンポーネントの初期化
-        repository = ChatRepository()
+//        repository = ChatRepository()
         imageManager = ImageManager(applicationContext)
         renderer = NotificationRenderer(applicationContext)
     }
@@ -100,7 +100,7 @@ class NotificationListener : NotificationListenerService() {
             val lineMessageId = extras.getString("line.message.id")
 
             // 3. データの保存と更新判定
-            val shouldNotify = repository.addMessage(
+            val shouldNotify = ChatRepository.addMessage(
                 messageId = lineMessageId,
                 chatId = chatId,
                 senderName = senderName,
@@ -114,13 +114,13 @@ class NotificationListener : NotificationListenerService() {
             // 4. 通知の発行
             if (shouldNotify) {
                 // 最新の情報を取得して表示
-                val messages = repository.getMessages(chatId)
+                val messages = ChatRepository.getMessages(chatId)
                 // Intentはキャッシュにある最新のものを使用（後出し更新対応）
-                val finalIntent = repository.getIntent(chatId) ?: originalIntent
+                val finalIntent = ChatRepository.getIntent(chatId) ?: originalIntent
 
                 renderer.showNotification(
                     chatId = chatId,
-                    groupName = repository.getGroupName(chatId), // 保存されている最新のグループ名
+                    groupName = ChatRepository.getGroupName(chatId), // 保存されている最新のグループ名
                     senderName = senderName,
                     messages = messages,
                     intent = finalIntent,
@@ -138,7 +138,7 @@ class NotificationListener : NotificationListenerService() {
         val chatId = sbn.notification.extras.getString("line.chat.id") ?: return
 
         serviceScope.launch {
-            repository.removeChat(chatId)
+            ChatRepository.removeChat(chatId)
             renderer.cancelNotification(chatId)
         }
     }

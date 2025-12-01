@@ -89,9 +89,32 @@ class NotificationRenderer(private val context: Context) {
             style.addMessage(styleMsg)
         }
 
+        // 1. バブルを開いたときのIntentを作成
+        val bubbleIntent = Intent(context, BubbleActivity::class.java).apply {
+            putExtra("EXTRA_CHAT_ID", chatId)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        val bubblePendingIntent = PendingIntent.getActivity(
+            context,
+            chatId.hashCode(),
+            bubbleIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE // Mutable必須
+        )
+
+        // 2. バブルのメタデータを作成
+        val bubbleMetadata = NotificationCompat.BubbleMetadata.Builder(
+            bubblePendingIntent,
+            mainIconCompat // グループアイコンや送信者アイコン
+        )
+            .setDesiredHeight(600) // バブルの高さ
+            .setSuppressNotification(false)
+            .setAutoExpandBubble(false)
+            .build()
+
         // Builder
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_line_bubble2) // ★リソースIDは適宜修正してください
+            .setBubbleMetadata(bubbleMetadata)
             .setLargeIcon(mainBitmap)
             .setColor(android.graphics.Color.parseColor("#0e803c"))
             .setStyle(style)
@@ -101,6 +124,16 @@ class NotificationRenderer(private val context: Context) {
             .setGroup(chatId)
             .setAutoCancel(true)
             .setContentIntent(intent)
+
+        if (intent != null) {
+            val openLineAction = NotificationCompat.Action.Builder(
+                R.drawable.ic_launcher_foreground, // 適当なアイコン（アプリアイコン等）
+                "LINEで開く", // ボタンの文字
+                intent // 本家LINEのトーク画面を開くIntent
+            ).build()
+
+            builder.addAction(openLineAction)
+        }
 
         // 返信アクション
         if (replyIntent != null && replyRemoteInputs != null) {

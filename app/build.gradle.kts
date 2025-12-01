@@ -53,8 +53,10 @@ dependencies {
 
     // 画像読み込み (スタンプ用)
     implementation("io.coil-kt:coil:2.5.0")
+    implementation("io.coil-kt:coil-compose:2.5.0")
     // 非同期処理 (ダウンロード待ち用)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
     // 【後で使うかも】アイコン類
     implementation("androidx.compose.material:material-icons-extended:1.5.4")
 

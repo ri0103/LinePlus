@@ -5,20 +5,27 @@ import android.util.Log
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.LinkedHashMap
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.filter
 
-class ChatRepository {
+object ChatRepository {
 
-    companion object {
-        private const val MAX_CHAT_HISTORY_SIZE = 30
-        private const val MAX_MSG_PER_CHAT = 20
-        private const val TAG = "ChatRepo"
-    }
+
+    private const val MAX_CHAT_HISTORY_SIZE = 30
+    private const val MAX_MSG_PER_CHAT = 20
+    private const val TAG = "ChatRepo"
+
 
     // Coroutine環境で安全にロックするためのMutex
     private val mutex = Mutex()
     private val chatHistory = LinkedHashMap<String, MutableList<MyMessage>>(16, 0.75f, true)
     private val chatMetadata = mutableMapOf<String, String>() // GroupName
     private val chatIntents = mutableMapOf<String, PendingIntent>() // Intent
+
+    private val _messagesUpdateFlow = MutableSharedFlow<String>(extraBufferCapacity = 64)
 
     // メッセージを追加する (戻り値: 通知を更新すべきかどうか)
     suspend fun addMessage(
@@ -80,6 +87,7 @@ class ChatRepository {
                             stickerUri = stickerUri ?: existingMsg.stickerUri
                         )
                         list[existingIndex] = updatedMsg
+                        _messagesUpdateFlow.tryEmit(chatId)
                     }
 
                     // 「中身が変わった」または「Intentが変わった」なら通知更新 (true)
@@ -129,6 +137,8 @@ class ChatRepository {
                 newList.removeAt(0)
             }
 
+            _messagesUpdateFlow.tryEmit(chatId)
+
             return true
         }
     }
@@ -137,6 +147,16 @@ class ChatRepository {
         mutex.withLock {
             return chatHistory[chatId]?.toList() ?: emptyList()
         }
+    }
+
+    // ★追加: リアルタイム監視用のFlow
+    fun getMessagesFlow(chatId: String): Flow<List<MyMessage>> {
+        return _messagesUpdateFlow
+            .filter { it == chatId } // このチャットの更新だけ拾う
+            .onStart { emit(chatId) } // 購読開始時に今のデータを一度流す
+            .map {
+                getMessages(chatId) // 最新リストを取得
+            }
     }
 
     suspend fun getGroupName(chatId: String): String? {
