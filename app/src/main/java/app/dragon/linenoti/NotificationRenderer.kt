@@ -15,6 +15,8 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class NotificationRenderer(private val context: Context) {
 
@@ -47,16 +49,17 @@ class NotificationRenderer(private val context: Context) {
         notificationManager.createNotificationChannel(channel)
     }
 
-    fun showNotification(
+    suspend fun showNotification(
         chatId: String,
         groupName: String?,
         senderName: String,
         messages: List<MyMessage>,
+        currentBitmap: Bitmap?,
         intent: PendingIntent?,
         replyIntent: PendingIntent?,
         replyRemoteInputs: Array<android.app.RemoteInput>?,
         wearableActions: List<NotificationCompat.Action>?
-    ) {
+    ) = withContext(Dispatchers.IO) {
         val isGroup = groupName != null
 
         // メイン画像の作成
@@ -76,8 +79,12 @@ class NotificationRenderer(private val context: Context) {
             .setConversationTitle(groupName)
             .setGroupConversation(isGroup)
 
+        val latestMsg = messages.lastOrNull()
+
         for (msg in messages) {
-            val person = createPerson(msg)
+            val useCurrent = (msg == latestMsg && currentBitmap != null)
+            val person = createPerson(msg, if (useCurrent) currentBitmap else null)
+
             val styleMsg = NotificationCompat.MessagingStyle.Message(
                 msg.text,
                 msg.timestamp,
@@ -125,15 +132,6 @@ class NotificationRenderer(private val context: Context) {
             .setAutoCancel(true)
             .setContentIntent(intent)
 
-        if (intent != null) {
-            val openLineAction = NotificationCompat.Action.Builder(
-                R.drawable.ic_launcher_foreground, // 適当なアイコン（アプリアイコン等）
-                "LINEで開く", // ボタンの文字
-                intent // 本家LINEのトーク画面を開くIntent
-            ).build()
-
-            builder.addAction(openLineAction)
-        }
 
         // 返信アクション
         if (replyIntent != null && replyRemoteInputs != null) {
@@ -171,20 +169,34 @@ class NotificationRenderer(private val context: Context) {
     }
 
     private fun createDefaultBitmap(): Bitmap {
-        // デフォルトアイコン生成ロジック
-        val drawable = ContextCompat.getDrawable(context, R.drawable.ic_groups_default) // ★リソースID
-        val bitmap = Bitmap.createBitmap(128, 128, Bitmap.Config.ARGB_8888)
+        val drawable = ContextCompat.getDrawable(context, R.drawable.ic_groups_default)
+        val size = 128
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
-        canvas.drawColor(android.graphics.Color.parseColor("#0e803c")) // LINE Green
+
+        // ★修正: 全体を塗りつぶすのではなく、円を描画する
+        val paint = android.graphics.Paint().apply {
+            isAntiAlias = true // フチを滑らかにする
+            color = android.graphics.Color.parseColor("#0e803c") // LINE Green
+            style = android.graphics.Paint.Style.FILL
+        }
+
+        // 中心の座標と半径を計算
+        val center = size / 2f
+        canvas.drawCircle(center, center, center, paint)
+
+        // アイコンを描画
         drawable?.let {
-            it.setBounds(0, 0, 128, 128)
+            it.setBounds(0, 0, size, size)
             it.draw(canvas)
         }
         return bitmap
     }
 
-    private fun createPerson(msg: MyMessage): Person {
-        val icon = if (msg.iconPath != null) {
+    private fun createPerson(msg: MyMessage, directBitmap: Bitmap?): Person {
+        val icon = if (directBitmap != null) {
+            IconCompat.createWithBitmap(directBitmap)
+        } else if (msg.iconPath != null) {
             try {
                 val bm = BitmapFactory.decodeFile(msg.iconPath)
                 IconCompat.createWithBitmap(bm)

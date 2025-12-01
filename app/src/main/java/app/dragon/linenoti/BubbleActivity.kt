@@ -2,6 +2,7 @@ package app.dragon.linenoti
 
 import android.app.PendingIntent
 import android.os.Bundle
+import android.app.ActivityOptions
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -32,6 +33,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
 
 class BubbleActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -82,10 +84,20 @@ fun BubbleScreen(chatId: String) {
                 ),
                 actions = {
                     if (targetIntent != null) {
+                        //バブルから本家トーク画面を開く
                         IconButton(onClick = {
                             try {
-                                // 本家LINEを開く！
-                                targetIntent?.send()
+                                val options = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) { // API 34+
+                                    ActivityOptions.makeBasic()
+                                        .setPendingIntentBackgroundActivityStartMode(ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
+                                        .toBundle()
+                                } else {
+                                    // Android 13以下は標準オプションでOK（またはnull）
+                                    ActivityOptions.makeBasic().toBundle()
+                                }
+
+                                // 本家LINEを開く（オプション付きで！）
+                                targetIntent?.send(null, 0, null, null, null, null, options)
                             } catch (e: Exception) {
                                 e.printStackTrace()
                             }

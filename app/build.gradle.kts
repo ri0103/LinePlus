@@ -11,8 +11,8 @@ android {
         applicationId = "app.dragon.linenoti"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.45"
+        versionCode = 9
+        versionName = "1.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

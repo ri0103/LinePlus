@@ -1,5 +1,6 @@
 package app.dragon.linenoti
 
+import android.app.PendingIntent
 import android.net.Uri
 
 data class MyMessage(

@@ -50,8 +50,7 @@ class ImageManager(private val context: Context) {
         }
     }
 
-    // アイコンを保存してパスを返す
-    suspend fun saveIcon(iconObj: Any?, nameKey: String): String? = withContext(Dispatchers.IO) {
+    suspend fun saveIcon(iconObj: Any?, nameKey: String): Pair<String, Bitmap>? = withContext(Dispatchers.IO) {
         if (iconObj == null) return@withContext null
 
         try {
@@ -70,12 +69,19 @@ class ImageManager(private val context: Context) {
             val fileName = "icon_${nameKey.hashCode()}.png"
             val file = File(cachePath, fileName)
 
-            if (!file.exists()) {
-                // アイコンは小さくリサイズして保存
-                val scaled = Bitmap.createScaledBitmap(bitmap, 128, 128, true)
-                saveBitmapToFile(scaled, file)
+            // アイコンのリサイズ (128x128)
+            // 既にファイルがあっても、表示用にメモリ上のBitmapは返す
+            val scaledBitmap = if (bitmap.width > 128 || bitmap.height > 128) {
+                Bitmap.createScaledBitmap(bitmap, 128, 128, true)
+            } else {
+                bitmap
             }
-            return@withContext file.absolutePath
+
+            if (!file.exists()) {
+                saveBitmapToFile(scaledBitmap, file)
+            }
+
+            return@withContext Pair(file.absolutePath, scaledBitmap)
         } catch (e: Exception) {
             return@withContext null
         }
@@ -105,6 +111,7 @@ class ImageManager(private val context: Context) {
     private fun saveBitmapToFile(bitmap: Bitmap, file: File) {
         FileOutputStream(file).use { stream ->
             bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
+            stream.flush() // 念のためflush
         }
     }
 }
