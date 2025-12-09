@@ -19,7 +19,7 @@ object ChatRepository {
     // Coroutine環境で安全にロックするためのMutex
     private val mutex = Mutex()
     private val chatHistory = LinkedHashMap<String, MutableList<MyMessage>>(16, 0.75f, true)
-    private val chatMetadata = mutableMapOf<String, String>() // GroupName
+    val chatMetadata = mutableMapOf<String, String>() // GroupName
     private val chatIntents = mutableMapOf<String, PendingIntent>() // Intent
 
     private val _messagesUpdateFlow = MutableSharedFlow<String>(extraBufferCapacity = 64)

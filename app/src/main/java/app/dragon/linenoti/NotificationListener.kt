@@ -65,14 +65,27 @@ class NotificationListener : NotificationListenerService() {
 
         // 1. データ抽出 (簡単なパースはここで行う)
         val text = extras.getCharSequence("android.text")?.toString() ?: "スタンプ"
+
         // フィルタリング
         if (shouldIgnore(notification, text)) return
 
         val chatId = extras.getString("line.chat.id") ?: "unknown_chat"
 
         // グループ名 & 送信者名の解決
-        val groupName = extras.getString("android.conversationTitle")
+        var groupName = extras.getString("android.conversationTitle")
             ?: extras.getString("android.hiddenConversationTitle")
+
+        if (groupName.isNullOrEmpty()) {
+            val cachedName = ChatRepository.chatMetadata[chatId]
+            if (!cachedName.isNullOrEmpty()) {
+                groupName = cachedName
+                Log.d(TAG, "グループ名をキャッシュから復元しました: $groupName")
+            }
+        } else {
+            // 今回取得できたなら、最新情報として上書き保存
+            ChatRepository.chatMetadata[chatId] = groupName
+        }
+
         val rawTitle = extras.getString("android.title") ?: "不明"
         val senderName = resolveSenderName(rawTitle, groupName)
 
